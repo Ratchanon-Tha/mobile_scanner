@@ -316,7 +316,7 @@ class _MobileScannerState extends State<MobileScanner>
     // because there is no way of knowing if a hot-restart has happened,
     // we must assume every start is a hot-restart. Related issue:
     // https://github.com/flutter/flutter/issues/10437
-    if (kDebugMode) {
+    // if (kDebugMode) {
       if (MobileScannerPlatform.instance
           case final MethodChannelMobileScanner implementation) {
         try {
@@ -326,7 +326,7 @@ class _MobileScannerState extends State<MobileScanner>
           debugPrint('$e');
         }
       }
-    }
+    // }
 
     if (widget.controller == null) {
       WidgetsBinding.instance.addObserver(this);
