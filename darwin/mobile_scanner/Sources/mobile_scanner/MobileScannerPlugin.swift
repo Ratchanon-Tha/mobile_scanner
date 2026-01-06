@@ -99,6 +99,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             start(call, result)
         case "toggleTorch":
             toggleTorch(result)
+        case "getSupportedLenses":
+            getSupportedLenses(result)
         case "setScale":
             setScale(call, result)
         case "setFocus":
@@ -349,7 +351,6 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 #endif
     }
 
-
     func start(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
         if (device != nil || captureSession != nil) {
             result(FlutterError(code: MobileScannerErrorCodes.ALREADY_STARTED_ERROR,
@@ -365,6 +366,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
         let torch:Bool = argReader.bool(key: "torch") ?? false
         let facing:Int = argReader.int(key: "facing") ?? 1
+        let lensType:Int = argReader.int(key: "lensType") ?? -1
         let speed:Int = argReader.int(key: "speed") ?? 0
         let timeoutMs:Int = argReader.int(key: "timeout") ?? 0
         let initialZoom: CGFloat? = {
@@ -386,26 +388,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 #else
         position = AVCaptureDevice.Position.front
 #endif
-        
-        // Open the camera device
-#if os(iOS)
-        if #available(iOS 13.0, *) {
-            device = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera], mediaType: .video, position: position).devices.first
-        }
-#else
-        if #available(macOS 10.15, *) {
-            device = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera], mediaType: .video, position: position).devices.first
-        }
-#endif
-        
-        if (device == nil) {
-            device = AVCaptureDevice.devices(for: .video).filter({$0.position == position}).first
-        }
-        
-        if (device == nil) {
-            device = AVCaptureDevice.default(for: .video)
-        }
-        
+
+        // Open the camera device based on position and lens type
+        device = MobileScannerCameraSelector.selectCamera(position: position, lensType: lensType)
+
         if (device == nil) {
             result(FlutterError(code: MobileScannerErrorCodes.NO_CAMERA_ERROR,
                                 message: MobileScannerErrorCodes.NO_CAMERA_ERROR_MESSAGE,
@@ -455,17 +441,15 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         }
         captureSession!.sessionPreset = AVCaptureSession.Preset.high
 
-        // Add video output
         let videoOutput = AVCaptureVideoDataOutput()
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        videoOutput.alwaysDiscardsLateVideoFrames = true
 
+        let format = getPreferredVideoFormat(videoOutput: videoOutput)
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: format]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue.main)
         captureSession!.addOutput(videoOutput)
         let deviceVideoOrientation = self.getVideoOrientation()
-        
 
-        // Adjust orientation for the video connection
         if let connection = videoOutput.connections.first {
             if connection.isVideoOrientationSupported {
                 connection.videoOrientation = deviceVideoOrientation
@@ -478,7 +462,6 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
         captureSession!.commitConfiguration()
 
-        // Move startRunning to a background thread to avoid blocking the main UI thread.
         DispatchQueue.global(qos: .background).async {
             self.captureSession!.startRunning()
 
@@ -491,12 +474,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                     dimensions = CMVideoDimensions()
                 }
 
-                // Turn on the torch if requested.
                 if (torch) {
                     self.turnTorchOn()
                 }
                 
-                // Set the initial zoom factor
                 if (initialZoom != nil) {
                     do {
                         try self.setScaleInternal(initialZoom!)
@@ -541,6 +522,38 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 result(answer)
             }
         }
+    }
+
+    /// Get the preferred video format for the given video output.
+    private func getPreferredVideoFormat(videoOutput: AVCaptureVideoDataOutput) -> OSType {
+        // Define preferred pixel formats in order of preference
+        let preferredFormats: [OSType] = [
+            kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        ]
+        
+        // Get available formats and convert from NSNumber to OSType
+        let availableFormats = videoOutput.availableVideoPixelFormatTypes
+        let availablePixelFormats = availableFormats.compactMap { ($0 as NSNumber).uint32Value }
+        
+        // Find the first preferred format that is available
+        for format in preferredFormats {
+            if availablePixelFormats.contains(format) {
+                return format
+            }
+        }
+        
+        if let firstAvailable = availablePixelFormats.first {
+            return firstAvailable
+        }
+        
+        // Ultimate fallback: use the original default format
+        return kCVPixelFormatType_32BGRA
+    }
+
+    private func getSupportedLenses(_ result: @escaping FlutterResult) {
+        result(MobileScannerCameraSelector.getSupportedLenses())
     }
 
     /// Turn the torch on.
@@ -1096,6 +1109,9 @@ extension VNBarcodeObservation {
             }
         }
 
+        // Detect barcode type from payload string value using heuristics
+        let barcodeType = payloadStringValue?.detectBarcodeType()
+
         let data = [
             // Clockwise, starting from the top-left corner.
             "corners":  [
@@ -1112,6 +1128,7 @@ extension VNBarcodeObservation {
                 "width": width,
                 "height": height,
             ],
+            "type": barcodeType,
         ] as [String : Any?]
         return data
     }
